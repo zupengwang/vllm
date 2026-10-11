@@ -92,46 +92,54 @@ def _extract_content_from_chunk(chunk_data: dict) -> str:
     return ""
 
 
-def _log_streaming_response(response, response_body: list) -> None:
+def _log_streaming_response(response) -> None:
     """Log streaming response with robust SSE parsing."""
+    response_body = response.body_iterator
     sse_decoder = SSEDecoder()
     chunk_count = 0
 
-    def buffered_iterator():
+    async def logging_iterator():
         nonlocal chunk_count
 
-        for chunk in response_body:
-            chunk_count += 1
-            yield chunk
+        try:
+            async for chunk in response_body:
+                chunk_count += 1
+                yield chunk
 
-            # Parse SSE events from chunk
-            events = sse_decoder.decode_chunk(chunk)
+                # Parse SSE events from chunk
+                events = sse_decoder.decode_chunk(chunk)
 
-            for event in events:
-                if event["type"] == "data":
-                    content = sse_decoder.extract_content(event["data"])
-                    sse_decoder.add_content(content)
-                elif event["type"] == "done":
-                    # Log complete content when done
-                    full_content = sse_decoder.get_complete_content()
-                    if full_content:
-                        # Truncate if too long
-                        if len(full_content) > 2048:
-                            full_content = full_content[:2048] + "...[truncated]"
-                        logger.info(
-                            "response_body={streaming_complete: content=%r, chunks=%d}",
-                            full_content,
-                            chunk_count,
-                        )
-                    else:
-                        logger.info(
-                            "response_body={streaming_complete: no_content, chunks=%d}",
-                            chunk_count,
-                        )
-                    return
+                for event in events:
+                    if event["type"] == "data":
+                        content = sse_decoder.extract_content(event["data"])
+                        sse_decoder.add_content(content)
+                    elif event["type"] == "done":
+                        # Log complete content when done
+                        full_content = sse_decoder.get_complete_content()
+                        if full_content:
+                            # Truncate if too long
+                            if len(full_content) > 2048:
+                                full_content = full_content[:2048] + "...[truncated]"
+                            logger.info(
+                                "response_body={streaming_complete: "
+                                "content=%r, chunks=%d}",
+                                full_content,
+                                chunk_count,
+                            )
+                        else:
+                            logger.info(
+                                "response_body={streaming_complete: "
+                                "no_content, chunks=%d}",
+                                chunk_count,
+                            )
+            if chunk_count == 0:
+                logger.info("response_body={<empty>}")
+        finally:
+            if (aclose := getattr(response_body, "aclose", None)) is not None:
+                await aclose()
 
-    response.body_iterator = iterate_in_threadpool(buffered_iterator())
-    logger.info("response_body={streaming_started: chunks=%d}", len(response_body))
+    response.body_iterator = logging_iterator()
+    logger.info("response_body={streaming_started}")
 
 
 def _log_non_streaming_response(response_body: list) -> None:
@@ -145,17 +153,19 @@ def _log_non_streaming_response(response_body: list) -> None:
 
 async def log_response(request: Request, call_next):
     response = await call_next(request)
-    response_body = [section async for section in response.body_iterator]
-    response.body_iterator = iterate_in_threadpool(iter(response_body))
     # Check if this is a streaming response by looking at content-type
     content_type = response.headers.get("content-type", "")
     is_streaming = content_type == "text/event-stream; charset=utf-8"
+    if is_streaming:
+        _log_streaming_response(response)
+        return response
+
+    response_body = [section async for section in response.body_iterator]
+    response.body_iterator = iterate_in_threadpool(iter(response_body))
 
     # Log response body based on type
     if not response_body:
         logger.info("response_body={<empty>}")
-    elif is_streaming:
-        _log_streaming_response(response, response_body)
     else:
         _log_non_streaming_response(response_body)
     return response
