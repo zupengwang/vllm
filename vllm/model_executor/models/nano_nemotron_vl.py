@@ -551,8 +551,9 @@ class NanoNemotronVLMultiModalProcessor(
                 num_tubelets = num_patches
             assert num_tubelets is not None
 
-            video_pruning_rate = self.info.ctx.get_mm_config().video_pruning_rate
-            if video_pruning_rate is not None and video_pruning_rate > 0.0:
+            video_pruning_rate = self.info.ctx.get_mm_config().video_pruning_rate or 0.0
+            pruning_enabled = video_pruning_rate > 0.0
+            if pruning_enabled:
                 # Start of EVS-specific code
                 num_tokens = compute_retained_tokens_count(
                     tokens_per_frame=feature_size,
@@ -569,7 +570,7 @@ class NanoNemotronVLMultiModalProcessor(
                 tokens_per_frame = [feature_size] * num_tubelets
 
             frame_duration_ms = int(1000 / metadata["fps"])
-            return hf_processor.get_video_repl(
+            replacement = hf_processor.get_video_repl(
                 tokens_per_frame=tokens_per_frame,
                 frames_indices=metadata["frames_indices"],
                 frame_duration_ms=frame_duration_ms,
@@ -578,10 +579,11 @@ class NanoNemotronVLMultiModalProcessor(
                 img_end_token_ids=hf_processor._img_end_token_ids,
                 img_context_token_ids=hf_processor._img_context_token_ids,
                 video_temporal_patch_size=T,
-                select_token_ids=(
-                    video_pruning_rate is None or video_pruning_rate <= 0.0
-                ),
+                select_token_ids=not pruning_enabled,
             )
+            if pruning_enabled:
+                replacement.num_encoder_tokens = feature_size * num_tubelets
+            return replacement
 
         return PromptReplacement(
             modality="video",

@@ -4,6 +4,7 @@
 
 from collections.abc import Mapping
 
+import numpy as np
 import pytest
 import torch
 from PIL import Image
@@ -138,3 +139,30 @@ def test_processor_override(
         max_num,
         hf_processor_mm_kwargs,
     )
+
+
+def test_nano_nemotron_video_pruning_preserves_encoder_compute_cost():
+    frames = np.zeros((9, 224, 224, 3), dtype=np.uint8)
+    metadata = {
+        "fps": 2.0,
+        "duration": 4.5,
+        "total_num_frames": len(frames),
+        "frames_indices": list(range(len(frames))),
+        "video_backend": "opencv",
+        "do_sample_frames": False,
+    }
+
+    def video_position(pruning_rate: float):
+        ctx = build_model_context(
+            "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
+            limit_mm_per_prompt={"video": 1},
+            model_config_kwargs={"video_pruning_rate": pruning_rate},
+        )
+        processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+        items = processor.info.parse_mm_data({"video": [(frames, metadata)]})
+        return processor("<video>", mm_items=items)["mm_placeholders"]["video"][0]
+
+    unpruned = video_position(0.0)
+    pruned = video_position(0.75)
+    assert pruned.get_num_embeds() < unpruned.get_num_embeds()
+    assert pruned.get_num_encoder_tokens() == unpruned.get_num_embeds()
